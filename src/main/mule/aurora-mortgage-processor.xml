@@ -407,7 +407,7 @@ var monthlyPayment = (${rla.loan.amount} * (${rla.interest.rate}/100/12) * pow(1
     TotalFinLiabilityMonthlyAmt: ${rla.total.monthly.financial.liabilities},
     TotalOtherFinLiabilityMonthlyAmt: ${rla.total.monthly.other.liabilities},
     TotalOtherAssetAmount: ${rla.total.other.assets},
-    ExternalId: "RLA-" ++ vars.extractedData.firstName ++ "-" ++ vars.extractedData.lastName ++ "-" ++ vars.extractedData.timestamp
+    External_ID__c: "RLA-" ++ vars.extractedData.firstName ++ "-" ++ vars.extractedData.lastName ++ "-" ++ vars.extractedData.timestamp
   }
 ]
 ]]>
@@ -415,7 +415,7 @@ var monthlyPayment = (${rla.loan.amount} * (${rla.interest.rate}/100/12) * pow(1
           </ee:message>
         </ee:transform>
 
-        <salesforce:upsert config-ref="Salesforce_Config" objectType="ResidentialLoanApplication" externalIdFieldName="ExternalId" doc:name="Upsert Salesforce LoanApplication" />
+        <salesforce:upsert config-ref="Salesforce_Config" objectType="ResidentialLoanApplication" externalIdFieldName="External_ID__c" doc:name="Upsert Salesforce LoanApplication" />
 
         <logger level="INFO" doc:name="Log RLA Response" message="ResidentialLoanApplication create response: #[payload]" />
         <set-variable value="#[payload.items[0].id]" doc:name="Set RLA ID" variableName="rlaId" />
