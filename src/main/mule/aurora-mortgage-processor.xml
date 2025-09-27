@@ -451,9 +451,7 @@ var monthlyPayment = (loanAmount * (${rla.interest.rate}/100/12) * pow(1 + (${rl
   text: ":white_check_mark: Team, a new mortgage application is ready for review! ( " ++ vars.documentKey ++ " )\n\n" ++
         "👤 *Applicant:* " ++ vars.extractedData.firstName ++ " " ++ vars.extractedData.lastName ++ " (" ++ originalEmail ++ ")\n" ++
         "📅 *Submitted:* " ++ submissionDate ++ "\n\n" ++
-        "🏠 *Loan Details:*\n" ++
-        "🔗 *Quick Links:*\n" ++
-        "• <" ++ opportunityLink ++ "|:rocket: Start Review>"
+        "<" ++ opportunityLink ++ "|:rocket: Start Review>" + " (Button links directly to the Opportunity)"
 }]]>
             </ee:set-payload>
           </ee:message>
