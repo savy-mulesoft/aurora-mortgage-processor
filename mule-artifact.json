@@ -1,0 +1,7 @@
+{
+  "name": "aurora-mortgage-processor",
+  "minMuleVersion": "4.9.9",
+  "javaSpecificationVersions": [
+    "17"
+  ]
+}

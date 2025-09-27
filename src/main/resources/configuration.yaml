@@ -1,0 +1,8 @@
+#IDP_Demo configurations
+IDP_Demo:
+  instanceName: s3-bucket-1758209907
+  region: us-east-1
+  awsAccessKeyId: ${secure::s3.accessKey}
+  awsSecretAccessKey: ${secure::s3.secretKey}
+  mlEnable: 'false'  
+  notifEnable: 'true'

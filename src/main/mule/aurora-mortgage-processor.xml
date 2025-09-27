@@ -1,0 +1,516 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce" xmlns:s3="http://www.mulesoft.org/schema/mule/s3" xmlns:email="http://www.mulesoft.org/schema/mule/email" xmlns:slack="http://www.mulesoft.org/schema/mule/slack" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+  http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+  http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+  http://www.mulesoft.org/schema/mule/s3 http://www.mulesoft.org/schema/mule/s3/current/mule-s3.xsd
+  http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+  http://www.mulesoft.org/schema/mule/slack http://www.mulesoft.org/schema/mule/slack/current/mule-slack.xsd
+  http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+">
+
+  <!-- S3 Triggered Mortgage Document Processing Flow -->
+  <flow name="s3-mortgage-document-processor" doc:id="s3-mortgage-document-processor">
+    
+    <!-- S3 New Object Listener -->
+    <s3:new-object-listener doc:name="On New Object" doc:id="0d0fd906-b329-4c05-bdf0-60acad816fe6" config-ref="Amazon_S3_Configuration" bucketName="${s3.bucket}" folder="${s3.mortgage.folder}" configurationName="notify-to-sqs-on-new">
+      <scheduling-strategy>
+        <fixed-frequency />
+      </scheduling-strategy>
+    </s3:new-object-listener>
+
+    <!-- Log new document -->
+    <logger level="INFO" doc:name="Log New Document" message="New document detected: #[payload.key]" />
+
+    <!-- Set document key -->
+    <set-variable value="#[payload.key]" doc:name="Set Document Key" variableName="documentKey" />
+
+    <!-- Step 1: Get IDP Access Token -->
+    <ee:transform doc:name="Prepare Token Request">
+      <ee:message>
+        <ee:set-payload>
+          <![CDATA[%dw 2.0
+output application/json
+---
+{
+  grant_type: "client_credentials",
+  client_id: "${idp.client.id}",
+  client_secret: "${idp.client.secret}"
+}]]>
+        </ee:set-payload>
+      </ee:message>
+    </ee:transform>
+
+    <http:request method="POST" doc:name="Get IDP Token" url="https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token">
+      <http:headers>
+        <![CDATA[#[{
+          'Content-Type': 'application/json'
+        }]]]>
+      </http:headers>
+      </http:request>
+      
+    <set-variable value="#[payload.access_token]" doc:name="Set Access Token" variableName="accessToken" />
+
+    <!-- Step 2: Get Document from S3 -->
+    <s3:get-object doc:name="Get Document from S3" config-ref="Amazon_S3_Configuration" bucketName="${s3.bucket}" key="#[vars.documentKey]" />
+
+    <set-variable value="#[payload]" doc:name="Set Document Content" variableName="documentContent" />
+
+    <!-- Step 3: Submit Document to IDP -->
+    <ee:transform doc:name="Prepare Multipart Form Data">
+      <ee:message>
+        <ee:set-payload>
+          <![CDATA[%dw 2.0
+output multipart/form-data
+---
+{
+  parts: {
+    file: {
+      headers: {
+        "Content-Disposition": {
+          "name": "file",
+          "filename": vars.documentKey
+        }
+      },
+      content: vars.documentContent
+    },
+    documentName: {
+      headers: {
+        "Content-Disposition": {
+          "name": "documentName"
+        }
+      },
+      content: vars.documentKey
+    }
+  }
+}]]>
+        </ee:set-payload>
+      </ee:message>
+    </ee:transform>
+
+    <http:request method="POST" doc:name="Submit Document to IDP" url="https://idp-rt.us-east-1.anypoint.mulesoft.com/api/v1/organizations/${idp.organization.id}/actions/${idp.action.id}/versions/1.0.0/executions">
+      <http:headers>
+        <![CDATA[#[{
+        'Authorization': 'Bearer ' ++ vars.accessToken,
+        'Accept': 'application/json'
+      }]]]>
+      </http:headers>
+    </http:request>
+
+    <set-variable value="#[payload.id]" doc:name="Set Execution ID" variableName="executionId" />
+
+    <!-- Step 4: Wait for Document Processing and Get Details from IDP -->
+    <set-variable value="#['https://idp-rt.us-east-1.anypoint.mulesoft.com/api/v1/organizations/${idp.organization.id}/actions/${idp.action.id}/versions/1.0.0/executions/' ++ vars.executionId ++ '?valueOnly=true']" doc:name="Set Details URL" variableName="detailsUrl" />
+
+    <!-- Wait for document processing to complete -->
+    <logger level="INFO" doc:name="Log Processing Wait" message="Waiting for document processing to complete..." />
+
+    <!-- Poll for completion (max 30 seconds, check every 2 seconds) -->
+    <set-variable value="#[false]" doc:name="Initialize Processing Complete" variableName="processingComplete" />
+
+    <foreach collection="#[1 to 15]" doc:name="Poll for Completion">
+      <!-- Skip remaining iterations if processing is already complete -->
+      <choice doc:name="Check if Already Complete">
+        <when expression="#[vars.processingComplete == true]">
+          <logger level="INFO" doc:name="Skip Iteration" message="Skipping iteration - processing already complete" />
+        </when>
+        <otherwise>
+          <logger level="INFO" doc:name="Wait 2 seconds" message="Waiting 2 seconds before next check..." />
+          <set-variable value="#[java!java::lang::Thread::sleep(2000)]" doc:name="Sleep" variableName="sleepResult" />
+
+          <http:request method="GET" doc:name="Check Document Status" url="#[vars.detailsUrl]">
+            <http:headers>
+              <![CDATA[#[{
+          'Accept': 'application/json',
+          'Authorization': 'Bearer ' ++ vars.accessToken
+        }]]]>
+            </http:headers>
+      </http:request>
+      
+          <set-variable value="#[payload]" doc:name="Set Document Details" variableName="documentDetails" />
+
+          <!-- Debug: Log the document details response -->
+          <logger level="INFO" doc:name="Log Document Details" message="Document details response: #[vars.documentDetails]" />
+
+          <!-- Check if processing is complete -->
+          <choice doc:name="Check Status">
+            <when expression="#[vars.documentDetails.status == 'SUCCEEDED']">
+              <logger level="INFO" doc:name="Log Success" message="Document processing completed successfully!" />
+              <flow-ref doc:name="idp-response-processor" name="idp-response-processor" />
+              <!-- Mark processing as complete to skip remaining iterations -->
+              <set-variable value="#[true]" doc:name="Set Processing Complete" variableName="processingComplete" />
+            </when>
+            <when expression="#[vars.documentDetails.status == 'FAILED']">
+              <logger level="ERROR" doc:name="Log Failure" message="Document processing failed: #[vars.documentDetails]" />
+              <flow-ref doc:name="Handle Failure" name="handle-failure" />
+              <!-- Mark processing as complete to skip remaining iterations -->
+              <set-variable value="#[true]" doc:name="Set Processing Complete" variableName="processingComplete" />
+            </when>
+            <otherwise>
+              <logger level="INFO" doc:name="Log Still Processing" message="Document still processing, status: #[vars.documentDetails.status]" />
+            </otherwise>
+          </choice>
+        </otherwise>
+      </choice>
+    </foreach>
+
+  </flow>
+
+
+  <!-- Sub-flow: Continue Processing -->
+  <sub-flow name="idp-response-processor" doc:id="continue-processing">
+    <!-- Step 5: Extract and Parse Document Data -->
+    <ee:transform doc:name="Extract Document Data">
+      <ee:message>
+        <ee:set-payload>
+          <![CDATA[%dw 2.0
+output application/java
+var stamp = now() as String {format: "yyyyMMddHHmmss", timezone: "UTC"}
+var jsonString = vars.documentDetails.prompts.Result.answer.value as String
+// Use read() function to parse JSON string - this handles escaped quotes properly
+var extractedData = read(jsonString, "application/json")
+---
+{
+  firstName: extractedData.first_name default "Unknown",
+  lastName: extractedData.last_name default "Lead",
+  email: "${default.test.email}" default extractedData.email default "document@aurora.com",
+  postalCode: extractedData.postal_code default "",
+  identifier: extractedData.identifier default "",
+  date: extractedData.date default "",
+  errors: extractedData.errors default {},
+  timestamp: stamp
+}]]>
+        </ee:set-payload>
+      </ee:message>
+    </ee:transform>
+
+    <set-variable value="#[payload]" doc:name="Set Extracted Data" variableName="extractedData" />
+
+    <!-- Check if there are errors in the extracted data -->
+    <choice doc:name="Check for Errors">
+      <when expression="#[sizeOf(vars.extractedData.errors) > 0]">
+        <logger level="WARN" doc:name="Log Errors Found" message="Document processing completed with errors for: #[vars.documentKey] - Errors: #[vars.extractedData.errors]" />
+
+        <!-- Send error email to user -->
+        <ee:transform doc:name="Prepare Error Email">
+          <ee:message>
+            <ee:set-payload>
+              <![CDATA[%dw 2.0
+output application/java
+var errorList = vars.extractedData.errors pluck $ joinBy "\n• "
+---
+{
+  to: [vars.extractedData.email],
+  subject: "Aurora Mortgage Application - Issues Found",
+  body: "Dear " ++ vars.extractedData.firstName ++ " " ++ vars.extractedData.lastName ++ ",\n\n" ++
+        "Thank you for submitting your mortgage application. We have processed your document, but we found some issues that need to be addressed:\n\n" ++
+        "• " ++ errorList ++ "\n\n" ++
+        "Please review and correct these issues, then resubmit your application. If you have any questions, please contact our support team.\n\n" ++
+        "Best regards,\n" ++
+        "Aurora Mortgage Team"
+}]]>
+            </ee:set-payload>
+          </ee:message>
+        </ee:transform>
+
+        <!-- Send error email to user (simulated for now) -->
+        <logger level="INFO" doc:name="Log Email Content" message="EMAIL TO SEND: To: #[payload.to], Subject: #[payload.subject], Body: #[payload.body]" />
+
+        <!-- Set HTML email body as payload with proper MIME type -->
+        <set-payload mimeType="text/html" value="&lt;html&gt;&lt;body&gt;&lt;p&gt;Dear Sarvarth Bhatnagar,&lt;/p&gt;&lt;p&gt;Thank you for submitting your mortgage application. We have processed your document, but we found some issues that need to be addressed:&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Postal code was not found or is invalid (use A1A 1A1 or 12345 / 12345-6789).&lt;/li&gt;&lt;li&gt;Identifier was missing or invalid. Please provide a valid SIN/SSN.&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Please review and correct these issues, then resubmit your application. If you have any questions, please contact our support team.&lt;/p&gt;&lt;p&gt;Best regards,&lt;br&gt;Aurora Mortgage Team&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;" doc:name="Set HTML Email Body" />
+
+        <!-- Send email via SMTP -->
+        <email:send doc:name="Send Error Email" config-ref="Email_SMTP" toAddresses="#[[vars.extractedData.email]]" subject="Aurora Mortgage Application - Issues Found" fromAddress="#['aurora.fins.agent@gmail.com']" />
+
+        <logger level="INFO" doc:name="Log Email Sent" message="Email sent successfully to: #[vars.extractedData.email]" />
+        <set-variable value="true" doc:name="Set Email Sent Flag" variableName="emailSent" />
+
+        <http:request method="POST" doc:name="Send Error to Slack" config-ref="http-request-config" path="/api/chat.postMessage">
+          <http:headers>
+            <![CDATA[#[{
+              'Authorization': 'Bearer ${slack.bot.token}',
+              'Content-Type': 'application/json'
+            }]]]>
+          </http:headers>
+        </http:request>
+
+        
+        <!-- Send error notification to Slack -->
+        <ee:transform doc:name="Prepare Error Slack Message">
+          <ee:message>
+            <ee:set-payload>
+              <![CDATA[%dw 2.0
+output application/json
+var emailContent = "To: " ++ vars.extractedData.email ++ "\n" ++
+                   "Subject: Aurora Mortgage Application - Issues Found\n" ++
+                   "Body:\n" ++
+                   "Dear " ++ vars.extractedData.firstName ++ " " ++ vars.extractedData.lastName ++ ",\n\n" ++
+                   "Thank you for submitting your mortgage application. We have processed your document, but we found some issues that need to be addressed:\n\n" ++
+                   (vars.extractedData.errors pluck $ joinBy "\n• " default "" replace /^/ with "• ") ++ "\n\n" ++
+                   "Please review and correct these issues, then resubmit your application. If you have any questions, please contact our support team.\n\n" ++
+                   "Best regards,\n" ++
+                   "Aurora Mortgage Team"
+---
+{
+  channel: "#${slack.channel.name}",
+  text:         "⚠️ Document Processing Completed with Issues!\n" ++
+        "📄 Document: " ++ vars.documentKey ++ "\n" ++
+        "❌ Issues found in document - user notified via email\n\n" ++
+        "```\n" ++ emailContent ++ "\n```"
+}]]>
+            </ee:set-payload>
+          </ee:message>
+        </ee:transform>
+
+        <http:request method="POST" doc:name="Send Error to Slack" config-ref="http-request-config" path="/api/chat.postMessage">
+          <http:headers>
+            <![CDATA[#[{
+            'Authorization': 'Bearer ${slack.bot.token}',
+            'Content-Type': 'application/json'
+          }]]]>
+          </http:headers>
+        </http:request>
+      </when>
+      <otherwise>
+        <!-- No errors - proceed with normal success flow -->
+        <logger level="INFO" doc:name="Log No Errors" message="Document processing completed successfully with no errors for: #[vars.documentKey]" />
+
+        <!-- Step 6: Create Salesforce Deal (Account + Contact + Opportunity) -->
+        <ee:transform doc:name="Build Account for Salesforce">
+          <ee:message>
+            <ee:set-payload>
+              <![CDATA[%dw 2.0
+output application/java
+var jsonString = vars.documentDetails.prompts.Result.answer.value as String
+var extractedData = read(jsonString, "application/json")
+var accountName = vars.extractedData.firstName ++ " " ++ vars.extractedData.lastName ++ " Household"
+---
+[
+  {
+    "type": "Account",
+    Name: accountName,
+    Type: "${account.type}",
+    Industry: "${account.industry}",
+    Rating: "${account.rating}",
+    External_Id__c: "ACC-" ++ vars.extractedData.firstName ++ "-" ++ vars.extractedData.lastName
+  }
+]
+]]>
+            </ee:set-payload>
+          </ee:message>
+        </ee:transform>
+
+        <salesforce:upsert config-ref="Salesforce_Config" objectType="Account" externalIdFieldName="External_Id__c" doc:name="Upsert Salesforce Account" />
+
+        <logger level="INFO" doc:name="Log Account Response" message="Account create response: #[payload]" />
+        <logger level="INFO" doc:name="Log Account Response JSON" message="Account create response JSON: #[write(payload, 'application/json')]" />
+        <logger level="INFO" doc:name="Log Account Response Details" message="Account response type: #[typeOf(payload)]" />
+        <logger level="INFO" doc:name="Log Account Response Keys" message="Account response keys: #[keysOf(payload)]" />
+        <logger level="INFO" doc:name="Log Account ID Field" message="Account payload.id: #[payload.id]" />
+        <logger level="INFO" doc:name="Log Account Items" message="Account payload.items: #[payload.items]" />
+        <logger level="INFO" doc:name="Log Account Successful" message="Account payload.successful: #[payload.successful]" />
+        <set-variable value="#[payload.items[0].id]" doc:name="Set Account ID" variableName="accountId" />
+        <logger level="INFO" doc:name="Log Account ID" message="Account created with ID: #[vars.accountId]" />
+
+        <!-- Create Contact -->
+        <ee:transform doc:name="Build Contact for Salesforce">
+            <ee:message>
+            <ee:set-payload>
+              <![CDATA[%dw 2.0
+output application/java
+var jsonString = vars.documentDetails.prompts.Result.answer.value as String
+var extractedData = read(jsonString, "application/json")
+var originalEmail = extractedData.email default "unknown@email.com"
+---
+[
+  {
+    "type": "Contact",
+    FirstName: vars.extractedData.firstName,
+    LastName: vars.extractedData.lastName,
+    Email: originalEmail,
+    Phone: "${contact.phone.default}",
+    Title: "${contact.title.default}",
+    LeadSource: "${contact.lead.source}",
+    AccountId: vars.accountId,
+    External_Id__c: originalEmail
+  }
+]
+]]>
+            </ee:set-payload>
+            </ee:message>
+          </ee:transform>
+
+        <salesforce:upsert config-ref="Salesforce_Config" objectType="Contact" externalIdFieldName="External_Id__c" doc:name="Upsert Salesforce Contact" />
+
+        <logger level="INFO" doc:name="Log Contact Response" message="Contact upsert response: #[payload]" />
+        <logger level="INFO" doc:name="Log Contact Response JSON" message="Contact upsert response JSON: #[write(payload, 'application/json')]" />
+        <logger level="INFO" doc:name="Log Contact Response Keys" message="Contact response keys: #[keysOf(payload)]" />
+        <logger level="INFO" doc:name="Log Contact Items" message="Contact payload.items: #[payload.items]" />
+        <set-variable value="#[payload.items[0].id]" doc:name="Set Contact ID" variableName="contactId" />
+        <logger level="INFO" doc:name="Log Contact ID" message="Contact created with ID: #[vars.contactId]" />
+
+        <!-- Create Opportunity -->
+        <ee:transform doc:name="Build Opportunity for Salesforce">
+          <ee:message>
+            <ee:set-payload>
+              <![CDATA[%dw 2.0
+output application/java
+var jsonString = vars.documentDetails.prompts.Result.answer.value as String
+var extractedData = read(jsonString, "application/json")
+var accountName = vars.extractedData.firstName ++ " " ++ vars.extractedData.lastName ++ " Household"
+var opportunityName = accountName ++ " - New Business - " ++ "${opportunity.amount.default}"
+var closeDate = (now() + |P${opportunity.close.date.days}D|) as Date {format: "yyyy-MM-dd"}
+---
+[
+  {
+    "type": "Opportunity",
+    Name: opportunityName,
+    StageName: "${opportunity.stage.name}",
+    Type: "${opportunity.type}",
+    LeadSource: "${opportunity.lead.source}",
+    Probability: ${opportunity.probability},
+    Amount: ${opportunity.amount.default},
+    CloseDate: closeDate,
+    AccountId: vars.accountId,
+    External_Id__c: opportunityName
+  }
+]
+]]>
+            </ee:set-payload>
+          </ee:message>
+        </ee:transform>
+
+        <salesforce:upsert config-ref="Salesforce_Config" objectType="Opportunity" externalIdFieldName="External_Id__c" doc:name="Upsert Salesforce Opportunity" />
+
+        <logger level="INFO" doc:name="Log Opportunity Response" message="Opportunity create response: #[payload]" />
+        <set-variable value="#[payload.items[0].id]" doc:name="Set Opportunity ID" variableName="opportunityId" />
+        <logger level="INFO" doc:name="Log Opportunity ID" message="Opportunity created with ID: #[vars.opportunityId]" />
+
+        <!-- Create ResidentialLoanApplication -->
+        <ee:transform doc:name="Build ResidentialLoanApplication for Salesforce">
+          <ee:message>
+            <ee:set-payload>
+              <![CDATA[%dw 2.0
+output application/java
+var jsonString = vars.documentDetails.prompts.Result.answer.value as String
+var extractedData = read(jsonString, "application/json")
+var applicationName = vars.extractedData.firstName ++ " " ++ vars.extractedData.lastName ++ " - Loan Application"
+var downPaymentAmount = (${rla.loan.amount} * ${rla.down.payment.percent}) / 100
+var monthlyPayment = (${rla.loan.amount} * (${rla.interest.rate}/100/12) * pow(1 + (${rla.interest.rate}/100/12), ${rla.loan.term.years}*12)) / (pow(1 + (${rla.interest.rate}/100/12), ${rla.loan.term.years}*12) - 1)
+---
+[
+  {
+    "type": "ResidentialLoanApplication",
+    Name: applicationName,
+    OpportunityId: vars.opportunityId,
+    InterestRate: ${rla.interest.rate.number},
+    TotalFinancialAssetAmount: ${rla.total.financial.assets},
+    TotalFinLiabilityMonthlyAmt: ${rla.total.monthly.financial.liabilities},
+    TotalOtherFinLiabilityMonthlyAmt: ${rla.total.monthly.other.liabilities},
+    TotalOtherAssetAmount: ${rla.total.other.assets},
+    ExternalId: "RLA-" ++ vars.extractedData.firstName ++ "-" ++ vars.extractedData.lastName ++ "-" ++ vars.extractedData.timestamp
+  }
+]
+]]>
+            </ee:set-payload>
+          </ee:message>
+        </ee:transform>
+
+        <salesforce:upsert config-ref="Salesforce_Config" objectType="ResidentialLoanApplication" externalIdFieldName="ExternalId" doc:name="Upsert Salesforce LoanApplication" />
+
+        <logger level="INFO" doc:name="Log RLA Response" message="ResidentialLoanApplication create response: #[payload]" />
+        <set-variable value="#[payload.items[0].id]" doc:name="Set RLA ID" variableName="rlaId" />
+        <logger level="INFO" doc:name="Log RLA ID" message="ResidentialLoanApplication created with ID: #[vars.rlaId]" />
+
+        <!-- Step 7: Send Success Notification to Slack -->
+        <ee:transform doc:name="Prepare Success Slack Message">
+          <ee:message>
+            <ee:set-payload>
+              <![CDATA[%dw 2.0
+output application/json
+var jsonString = vars.documentDetails.prompts.Result.answer.value as String
+var extractedData = read(jsonString, "application/json")
+var originalEmail = extractedData.email default "unknown@email.com"
+var opportunityId = vars.opportunityId default "N/A"
+var rlaId = vars.rlaId default "N/A"
+var opportunityLink = if (opportunityId != "N/A") 
+  "${sfdc.lightning.url}/lightning/r/Opportunity/" ++ opportunityId ++ "/view"
+else 
+  "N/A"
+var rlaLink = if (rlaId != "N/A") 
+  "${sfdc.lightning.url}/lightning/r/ResidentialLoanApplication/" ++ rlaId ++ "/view"
+else 
+  "N/A"
+var submissionDate = now() as String {format: "MMMM d, yyyy"}
+var loanAmount = "${rla.loan.amount}" as Number
+var propertyValue = "${rla.property.value}" as Number
+var downPayment = (loanAmount * ${rla.down.payment.percent}) / 100
+var monthlyPayment = (loanAmount * (${rla.interest.rate}/100/12) * pow(1 + (${rla.interest.rate}/100/12), ${rla.loan.term.years}*12)) / (pow(1 + (${rla.interest.rate}/100/12), ${rla.loan.term.years}*12) - 1)
+---
+{
+  channel: "#${slack.channel.name}",
+  text: ":white_check_mark: Team, a new mortgage application is ready for review! ( " ++ vars.documentKey ++ " )\n\n" ++
+        "👤 *Applicant:* " ++ vars.extractedData.firstName ++ " " ++ vars.extractedData.lastName ++ " (" ++ originalEmail ++ ")\n" ++
+        "📅 *Submitted:* " ++ submissionDate ++ "\n\n" ++
+        "🏠 *Loan Details:*\n" ++
+        "🔗 *Quick Links:*\n" ++
+        "• <" ++ opportunityLink ++ "|:rocket: Start Review>"
+}]]>
+            </ee:set-payload>
+          </ee:message>
+        </ee:transform>
+
+        <logger level="INFO" doc:name="Log Slack Message" message="Slack message prepared: #[payload]" />
+        <logger level="INFO" doc:name="Log Slack Message JSON" message="Slack message JSON: #[write(payload, 'application/json')]" />
+
+        <http:request method="POST" doc:name="Send Success to Slack" config-ref="http-request-config" path="/api/chat.postMessage">
+          <http:headers>
+            <![CDATA[#[{
+              'Authorization': 'Bearer ${slack.bot.token}',
+              'Content-Type': 'application/json'
+            }]]]>
+          </http:headers>
+        </http:request>
+
+        <logger level="INFO" doc:name="Log Slack Response" message="Slack response: #[payload]" />
+      </otherwise>
+    </choice>
+
+    <!-- Log completion -->
+    <logger level="INFO" doc:name="Log Processing Complete" message="Mortgage document processing completed for: #[vars.documentKey]" />
+  </sub-flow>
+
+  <!-- Sub-flow: Handle Failure -->
+  <sub-flow name="handle-failure" doc:id="handle-failure">
+    <logger level="ERROR" doc:name="Log Processing Failed" message="Document processing failed for: #[vars.documentKey]" />
+
+    <!-- Send error notification to Slack -->
+    <ee:transform doc:name="Prepare Error Slack Message">
+      <ee:message>
+        <ee:set-payload>
+          <![CDATA[%dw 2.0
+output application/json
+---
+{
+  channel: "#${slack.channel.name}",
+  text: "❌ Document Processing Failed!\n" ++
+        "📄 Document: " ++ vars.documentKey ++ "\n" ++
+        "🆔 Execution ID: " ++ vars.executionId ++ "\n" ++
+        "📋 Status: " ++ (vars.documentDetails.status default "Unknown") ++ "\n" ++
+        "⚠️ Please check the document and try again."
+}]]>
+        </ee:set-payload>
+      </ee:message>
+    </ee:transform>
+
+    <http:request method="POST" doc:name="Send Error to Slack" config-ref="http-request-config" path="/api/chat.postMessage">
+      <http:headers>
+        <![CDATA[#[{
+            'Authorization': 'Bearer ${slack.bot.token}',
+            'Content-Type': 'application/json'
+          }]]]>
+      </http:headers>
+    </http:request>
+  </sub-flow>
+
+
+</mule>

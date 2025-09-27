@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"   xmlns:http="http://www.mulesoft.org/schema/mule/http"
+  xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+  xmlns:s3="http://www.mulesoft.org/schema/mule/s3"
+  xmlns:email="http://www.mulesoft.org/schema/mule/email"
+  xmlns:slack="http://www.mulesoft.org/schema/mule/slack"
+  xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+  xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+  http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+  http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+  http://www.mulesoft.org/schema/mule/s3 http://www.mulesoft.org/schema/mule/s3/current/mule-s3.xsd
+  http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+  http://www.mulesoft.org/schema/mule/slack http://www.mulesoft.org/schema/mule/slack/current/mule-slack.xsd
+  http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+">
+
+  <!-- Configuration Properties -->
+  <configuration-properties file="config.properties" doc:name="Configuration properties" />
+
+  <!-- HTTP Listener Configuration -->
+  <http:listener-config name="http-listener-config" doc:name="HTTP Listener Config" doc:id="http-listener-config">
+    <http:listener-connection host="0.0.0.0" port="${http.listener.port}" />
+  </http:listener-config>
+
+  <!-- HTTP Request Configuration for Slack -->
+  <http:request-config name="http-request-config" doc:name="HTTP Request Config" doc:id="http-request-config">
+    <http:request-connection host="${http.host}" port="${http.port}" protocol="${http.protocol}" />
+  </http:request-config>
+
+  <!-- HTTP Request Configuration for IDP OAuth -->
+  <http:request-config name="idp-oauth-http-request-config" doc:name="IDP OAuth HTTP Request Config" doc:id="idp-oauth-http-request-config">
+    <http:request-connection host="${idp.oauth.host}" protocol="${idp.oauth.protocol}" />
+  </http:request-config>
+
+      <!-- HTTP Request Configuration for IDP Runtime -->
+      <http:request-config name="idp-rt-http-request-config" doc:name="IDP Runtime HTTP Request Config" doc:id="idp-rt-http-request-config">
+        <http:request-connection host="${idp.rt.host}" protocol="${idp.rt.protocol}" />
+      </http:request-config>
+
+      <!-- Email Configuration -->
+      <email:smtp-config name="Email_SMTP" doc:name="Email SMTP" doc:id="cc2dd474-631a-413a-9225-f14b579012aa">
+        <email:smtp-connection host="smtp.gmail.com" port="587" user="aurora.fins.agent@gmail.com" password="aluh mxtc edjt giom">
+          <email:properties>
+            <email:property key="mail.smtp.starttls.enable" value="true" />
+            <email:property key="mail.smtp.auth" value="true" />
+            <email:property key="mail.mime.charset" value="UTF-8" />
+          </email:properties>
+        </email:smtp-connection>
+      </email:smtp-config>
+
+
+  <!-- Salesforce Configuration -->
+  <salesforce:sfdc-config name="Salesforce_Config" doc:name="Salesforce Config" doc:id="6e9d3e98-b6e8-491f-8ffa-5361d44d2310">
+    <salesforce:basic-connection username="${sfdc.username}" password="${sfdc.password}"/>
+  </salesforce:sfdc-config>
+
+  <!-- Amazon S3 Configuration -->
+  <s3:config name="Amazon_S3_Configuration" doc:name="Amazon S3 Configuration" doc:id="a85f562d-bbdc-45dc-8a34-d03cc54598ae">
+    <s3:connection accessKey="${s3.accessKey}" secretKey="${s3.secretKey}" region="${s3.region}" />
+  </s3:config>
+
+
+
+</mule>
